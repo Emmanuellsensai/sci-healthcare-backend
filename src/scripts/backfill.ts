@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 
 import pino from 'pino';
 
-import { prisma, disconnect } from '../db.js';
+import { disconnect } from '../db.js';
 import { env, INDEXED_CONTRACTS } from '../env.js';
 import { server } from '../stellar/client.js';
 import { decodeEvent, type DecodedEvent } from '../stellar/events.js';

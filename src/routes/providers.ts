@@ -26,11 +26,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       querystring: listQuery,
     },
   }, async (req, reply) => {
-    const parsed = listQuery.safeParse(req.query);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
-    }
-    const { status, country, q, cursor, limit, offset } = parsed.data;
+    const { status, country, q, cursor, limit, offset } = req.query as z.infer<typeof listQuery>;
 
     const formatProvider = (p: {
       address: string;
@@ -95,13 +91,18 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         where,
         include: { services: { where: { active: true } } },
         orderBy: [{ registeredAt: 'desc' }, { address: 'desc' }],
-        take: limit,
+        take: limit + 1,
         skip: offset,
       }),
       prisma.provider.count({ where }),
     ]);
 
-    return { total, limit, offset, providers: rows.map(formatProvider) };
+    const hasNext = rows.length > limit;
+    const page = hasNext ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    const nextCursor = hasNext && last ? encodeCursor(last.registeredAt, last.address) : undefined;
+
+    return { total, limit, offset, nextCursor, providers: page.map(formatProvider) };
   });
 
   f.get('/providers/:address', {

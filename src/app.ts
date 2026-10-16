@@ -27,6 +27,16 @@ export async function buildApp(
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
+  app.setErrorHandler((error, _req, reply) => {
+    const err = error as Record<string, unknown>;
+    if (err.validation || err.statusCode === 400) {
+      const issues = err.validation ?? JSON.parse(typeof err.message === 'string' ? err.message : '[]');
+      return reply.code(400).send({ error: 'invalid_query', issues });
+    }
+    const code = typeof err.statusCode === 'number' ? err.statusCode : 500;
+    reply.code(code).send({ error: typeof err.message === 'string' ? err.message : 'internal_error' });
+  });
+
   await app.register(swagger, {
     openapi: {
       openapi: '3.1.0',

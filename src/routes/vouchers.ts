@@ -50,11 +50,7 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
       querystring: listQuery,
     },
   }, async (req, reply) => {
-    const parsed = listQuery.safeParse(req.query);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
-    }
-    const { funder, provider, beneficiaryRef, status, cursor, limit, offset } = parsed.data;
+    const { funder, provider, beneficiaryRef, status, cursor, limit, offset } = req.query as z.infer<typeof listQuery>;
 
     if (!funder && !provider && !beneficiaryRef && !status) {
       return reply.code(400).send({
@@ -112,14 +108,19 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         where,
         include: { provider: true },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: limit,
+        take: limit + 1,
         skip: offset,
       }),
       prisma.voucher.count({ where }),
     ]);
 
-    const labels = await serviceLabels(rows);
-    return { total, limit, offset, vouchers: rows.map((v) => serialise(v, labels)) };
+    const hasNext = rows.length > limit;
+    const page = hasNext ? rows.slice(0, limit) : rows;
+    const labels = await serviceLabels(page);
+    const last = page[page.length - 1];
+    const nextCursor = hasNext && last ? encodeCursor(last.createdAt, last.id) : undefined;
+
+    return { total, limit, offset, nextCursor, vouchers: page.map((v) => serialise(v, labels)) };
   });
 
   f.get('/vouchers/due', {
@@ -130,11 +131,7 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
       querystring: dueQuery,
     },
   }, async (req, reply) => {
-    const parsed = dueQuery.safeParse(req.query);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
-    }
-    const { funder, provider, within } = parsed.data;
+    const { funder, provider, within } = req.query as z.infer<typeof dueQuery>;
 
     if (!funder && !provider) {
       return reply.code(400).send({

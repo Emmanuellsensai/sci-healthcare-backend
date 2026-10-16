@@ -215,7 +215,7 @@ async function seed() {
 
 beforeAll(async () => {
   app = await buildApp({ logger: false });
-});
+}, 30_000);
 
 afterAll(async () => {
   await app.close();

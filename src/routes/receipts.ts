@@ -37,11 +37,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       querystring: listQuery,
     },
   }, async (req, reply) => {
-    const parsed = listQuery.safeParse(req.query);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
-    }
-    const { beneficiaryRef, provider, cursor, limit, offset } = parsed.data;
+    const { beneficiaryRef, provider, cursor, limit, offset } = req.query as z.infer<typeof listQuery>;
 
     const baseWhere = beneficiaryRef
       ? { beneficiaryRef }
@@ -100,7 +96,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       prisma.receipt.findMany({
         where: baseWhere,
         orderBy: [{ settledAt: 'desc' }, { voucherId: 'desc' }],
-        take: limit,
+        take: limit + 1,
         skip: offset,
       }),
       prisma.receipt.count({ where: baseWhere }),
@@ -110,7 +106,11 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       }),
     ]);
 
-    const labels = await serviceLabels(rows);
+    const hasNext = rows.length > limit;
+    const page = hasNext ? rows.slice(0, limit) : rows;
+    const labels = await serviceLabels(page);
+    const last = page[page.length - 1];
+    const nextCursor = hasNext && last ? encodeCursor(last.settledAt, last.voucherId) : undefined;
     const totalSpend = spend
       .reduce((acc, r) => acc + BigInt(r.amount), 0n)
       .toString();
@@ -119,9 +119,10 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       total,
       limit,
       offset,
+      nextCursor,
       totalSpend,
       totalSpendDisplay: fromBaseUnits(totalSpend),
-      receipts: rows.map((r) => formatReceipt(r, labels)),
+      receipts: page.map((r) => formatReceipt(r, labels)),
     };
   });
 
@@ -133,11 +134,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       params: voucherIdParam,
     },
   }, async (req, reply) => {
-    const parsed = voucherIdParam.safeParse(req.params);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
-    }
-    const { voucherId } = parsed.data;
+    const { voucherId } = req.params as z.infer<typeof voucherIdParam>;
 
     const receipt = await prisma.receipt.findUnique({
       where: { voucherId },
