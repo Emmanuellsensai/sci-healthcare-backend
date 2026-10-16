@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
+import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { isRefundable, isSettleable, refundableAt } from '../lib/lifecycle.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 
@@ -26,7 +27,8 @@ const listQuery = z.object({
   provider: z.string().length(56).optional(),
   beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
   status: statusList.optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: cursorParam,
+  limit: limitParam,
   offset: z.coerce.number().int().min(0).default(0),
 });
 
@@ -42,15 +44,47 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
     }
-    const { funder, provider, beneficiaryRef, status, limit, offset } = parsed.data;
+    const { funder, provider, beneficiaryRef, status, cursor, limit, offset } = parsed.data;
 
-    // At least one selector is required. An unfiltered dump of every
-    // voucher in the system is not a useful endpoint and invites scraping.
     if (!funder && !provider && !beneficiaryRef && !status) {
       return reply.code(400).send({
         error: 'filter_required',
         message: 'Provide at least one of: funder, provider, beneficiaryRef, status',
       });
+    }
+
+    if (cursor) {
+      const decoded = decodeCursor(cursor);
+      if (!decoded) {
+        return reply.code(400).send({ error: 'invalid_cursor' });
+      }
+
+      const cursorDate = new Date(decoded.createdAt);
+      const where = {
+        ...(funder ? { funder } : {}),
+        ...(provider ? { providerAddress: provider } : {}),
+        ...(beneficiaryRef ? { beneficiaryRef } : {}),
+        ...(status ? { status: { in: status } } : {}),
+        OR: [
+          { createdAt: { lt: cursorDate } },
+          { createdAt: cursorDate, id: { lt: decoded.id } },
+        ],
+      };
+
+      const rows = await prisma.voucher.findMany({
+        where,
+        include: { provider: true },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit + 1,
+      });
+
+      const hasNext = rows.length > limit;
+      const page = hasNext ? rows.slice(0, limit) : rows;
+      const labels = await serviceLabels(page);
+      const last = page[page.length - 1];
+      const nextCursor = hasNext && last ? encodeCursor(last.createdAt, last.id) : null;
+
+      return { limit, nextCursor, vouchers: page.map((v) => serialise(v, labels)) };
     }
 
     const where = {
@@ -60,11 +94,14 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
       ...(status ? { status: { in: status } } : {}),
     };
 
+    const deprecation = offset > 0 ? { 'Deprecation': 'true' } : undefined;
+    if (deprecation) reply.headers(deprecation);
+
     const [rows, total] = await Promise.all([
       prisma.voucher.findMany({
         where,
         include: { provider: true },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
         skip: offset,
       }),

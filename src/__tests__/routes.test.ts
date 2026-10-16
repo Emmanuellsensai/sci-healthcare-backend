@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { buildApp } from '../app.js';
 import { prisma } from '../db.js';
 import { CONTRACTS, env } from '../env.js';
+import { encodeCursor } from '../lib/cursor.js';
 import { CLAIM_GRACE_MS } from '../lib/lifecycle.js';
 import { server } from '../stellar/client.js';
 
@@ -601,6 +602,64 @@ describe('GET /governance', () => {
       pendingAdmin: null,
       history: [],
     });
+  });
+});
+
+describe('cursor pagination', () => {
+  it('pages through vouchers with cursor', async () => {
+    const { body: page1 } = await get(`/vouchers?funder=${FUNDER}&limit=2`);
+    expect(page1.vouchers).toHaveLength(2);
+
+    const cursor = encodeCursor(
+      new Date(page1.vouchers[1].createdAt),
+      page1.vouchers[1].id,
+    );
+    const { body: page2 } = await get(`/vouchers?funder=${FUNDER}&limit=2&cursor=${cursor}`);
+    expect(page2.vouchers.length).toBeGreaterThan(0);
+
+    const page1Ids = page1.vouchers.map((v: { id: string }) => v.id);
+    const page2Ids = page2.vouchers.map((v: { id: string }) => v.id);
+    expect(page1Ids.filter((id: string) => page2Ids.includes(id))).toEqual([]);
+  });
+
+  it('returns null nextCursor on the last page', async () => {
+    const { body } = await get(`/vouchers?funder=${FUNDER}&limit=100`);
+    expect(body.nextCursor).toBeUndefined();
+  });
+
+  it('rejects an invalid cursor', async () => {
+    const { status, body } = await get(`/vouchers?funder=${FUNDER}&cursor=not-valid!!`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_cursor');
+  });
+
+  it('pages through providers with cursor', async () => {
+    const { body: page1 } = await get('/providers?limit=1');
+    expect(page1.providers).toHaveLength(1);
+    expect(page1.nextCursor).toBeTruthy();
+
+    const { body: page2 } = await get(`/providers?limit=1&cursor=${page1.nextCursor}`);
+    expect(page2.providers).toHaveLength(1);
+    expect(page2.providers[0].address).not.toBe(page1.providers[0].address);
+    expect(page2.nextCursor).toBeNull();
+  });
+
+  it('pages through receipts with cursor', async () => {
+    const { body: page1 } = await get(`/receipts?beneficiaryRef=${REF}&limit=1`);
+    expect(page1.receipts).toHaveLength(1);
+
+    const cursor = encodeCursor(
+      new Date(page1.receipts[0].settledAt),
+      page1.receipts[0].voucherId,
+    );
+    const { body: page2 } = await get(`/receipts?beneficiaryRef=${REF}&limit=1&cursor=${cursor}`);
+    expect(page2.receipts).toHaveLength(1);
+    expect(page2.receipts[0].voucherId).not.toBe(page1.receipts[0].voucherId);
+  });
+
+  it('sends Deprecation header when offset is used', async () => {
+    const res = await app.inject({ method: 'GET', url: `/vouchers?funder=${FUNDER}&offset=1` });
+    expect(res.headers['deprecation']).toBe('true');
   });
 });
 

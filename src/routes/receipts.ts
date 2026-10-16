@@ -4,13 +4,15 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
+import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 
 const listQuery = z
   .object({
     beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
     provider: z.string().length(56).optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: cursorParam,
+    limit: limitParam,
     offset: z.coerce.number().int().min(0).default(0),
   })
   .refine((data) => Boolean(data.beneficiaryRef) !== Boolean(data.provider), {
@@ -36,22 +38,71 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
     }
-    const { beneficiaryRef, provider, limit, offset } = parsed.data;
+    const { beneficiaryRef, provider, cursor, limit, offset } = parsed.data;
 
-    const where = beneficiaryRef
+    const baseWhere = beneficiaryRef
       ? { beneficiaryRef }
       : { providerAddress: provider! };
 
+    const isProviderView = Boolean(provider);
+
+    const formatReceipt = (r: {
+      voucherId: string;
+      providerAddress: string;
+      serviceCode: number;
+      amount: string;
+      settledAt: Date;
+      beneficiaryRef: string;
+    }, labels: Map<string, string>) => ({
+      voucherId: r.voucherId,
+      providerAddress: r.providerAddress,
+      serviceCode: r.serviceCode,
+      serviceLabel: labels.get(serviceKey(r.providerAddress, r.serviceCode)) ?? null,
+      amount: r.amount,
+      amountDisplay: fromBaseUnits(r.amount),
+      settledAt: r.settledAt,
+      ...(isProviderView ? {} : { beneficiaryRef: r.beneficiaryRef }),
+    });
+
+    if (cursor) {
+      const decoded = decodeCursor(cursor);
+      if (!decoded) {
+        return reply.code(400).send({ error: 'invalid_cursor' });
+      }
+      const cursorDate = new Date(decoded.createdAt);
+      const where = {
+        ...baseWhere,
+        OR: [
+          { settledAt: { lt: cursorDate } },
+          { settledAt: cursorDate, voucherId: { lt: decoded.id } },
+        ],
+      };
+      const rows = await prisma.receipt.findMany({
+        where,
+        orderBy: [{ settledAt: 'desc' }, { voucherId: 'desc' }],
+        take: limit + 1,
+      });
+      const hasNext = rows.length > limit;
+      const page = hasNext ? rows.slice(0, limit) : rows;
+      const labels = await serviceLabels(page);
+      const last = page[page.length - 1];
+      const nextCursor = hasNext && last ? encodeCursor(last.settledAt, last.voucherId) : null;
+      return { limit, nextCursor, receipts: page.map((r) => formatReceipt(r, labels)) };
+    }
+
+    const deprecation = offset > 0 ? { 'Deprecation': 'true' } : undefined;
+    if (deprecation) reply.headers(deprecation);
+
     const [rows, total, spend] = await Promise.all([
       prisma.receipt.findMany({
-        where,
-        orderBy: { settledAt: 'desc' },
+        where: baseWhere,
+        orderBy: [{ settledAt: 'desc' }, { voucherId: 'desc' }],
         take: limit,
         skip: offset,
       }),
-      prisma.receipt.count({ where }),
+      prisma.receipt.count({ where: baseWhere }),
       prisma.receipt.findMany({
-        where,
+        where: baseWhere,
         select: { amount: true },
       }),
     ]);
@@ -61,23 +112,13 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       .reduce((acc, r) => acc + BigInt(r.amount), 0n)
       .toString();
 
-    const isProviderView = Boolean(provider);
     return {
       total,
       limit,
       offset,
       totalSpend,
       totalSpendDisplay: fromBaseUnits(totalSpend),
-      receipts: rows.map((r) => ({
-        voucherId: r.voucherId,
-        providerAddress: r.providerAddress,
-        serviceCode: r.serviceCode,
-        serviceLabel: labels.get(serviceKey(r.providerAddress, r.serviceCode)) ?? null,
-        amount: r.amount,
-        amountDisplay: fromBaseUnits(r.amount),
-        settledAt: r.settledAt,
-        ...(isProviderView ? {} : { beneficiaryRef: r.beneficiaryRef }),
-      })),
+      receipts: rows.map((r) => formatReceipt(r, labels)),
     };
   });
 
