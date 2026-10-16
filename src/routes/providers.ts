@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
+import { isPostgres } from '../lib/database.js';
 
 const listQuery = z.object({
   status: z.enum(['Pending', 'Active', 'Suspended']).optional(),
@@ -14,6 +15,12 @@ const listQuery = z.object({
   limit: limitParam,
   offset: z.coerce.number().int().min(0).default(0),
 });
+
+function nameContains(q: string): { contains: string; mode?: string } {
+  const filter: { contains: string; mode?: string } = { contains: q };
+  if (isPostgres) filter.mode = 'insensitive';
+  return filter;
+}
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
   const f = app.withTypeProvider<ZodTypeProvider>();
@@ -58,7 +65,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const where = {
         ...(status ? { status } : {}),
         ...(country ? { country } : {}),
-        ...(q ? { name: { contains: q } } : {}),
+        ...(q ? { name: nameContains(q) } : {}),
         OR: [
           { registeredAt: { lt: cursorDate } },
           { registeredAt: cursorDate, address: { lt: decoded.id } },
@@ -80,7 +87,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     const where = {
       ...(status ? { status } : {}),
       ...(country ? { country } : {}),
-      ...(q ? { name: { contains: q } } : {}),
+      ...(q ? { name: nameContains(q) } : {}),
     };
 
     const deprecation = offset > 0 ? { 'Deprecation': 'true' } : undefined;
@@ -210,6 +217,20 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         ledger: c.ledger,
         changedAt: c.changedAt,
       })),
+    };
+  });
+
+  app.get('/countries', async () => {
+    const grouped = await prisma.provider.groupBy({
+      by: ['country'],
+      where: { status: 'Active' },
+      _count: { _all: true },
+    });
+
+    return {
+      countries: grouped
+        .map((g) => ({ code: g.country, clinicCount: g._count._all }))
+        .sort((a, b) => a.code.localeCompare(b.code)),
     };
   });
 }

@@ -72,16 +72,19 @@ The cursor is guarded by a lease (stored on `IndexerState`). However many indexe
 | `GET /health` | Liveness |
 | `GET /ready` | Readiness; 503 once the indexer trails by more than `READY_MAX_LAG_LEDGERS` |
 | `GET /stats` | Protocol counters for the dashboard |
-| `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` |
+| `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` (case-insensitive name search) |
 | `GET /providers/:address` | One clinic and its service catalogue |
 | `GET /providers/:address/history` | Every status transition for a clinic, oldest first |
 | `GET /providers/:address/services/:code/history` | Every observed price for a service, oldest first |
-| `GET /vouchers` | Vouchers by `funder`, `provider`, `beneficiaryRef` or `status` |
+| `GET /countries` | Countries with at least one active clinic and their clinic counts |
+| `GET /services` | Active services grouped by code: labels, clinic count, min/max/median price |
+| `GET /services/:code` | Active clinics offering a service code with their prices, cheapest first |
+| `GET /vouchers` | Vouchers by `funder`, `provider`, `beneficiaryRef` or `status`, sorted by `sort`/`order` |
 | `GET /vouchers/:id` | One voucher, with its care receipt if settled |
 | `GET /receipts?beneficiaryRef=` | A patient's settled care history |
 | `GET /governance` | Current and pending admin per contract, plus the handover history |
 
-`GET /vouchers` **requires at least one filter**. An unfiltered dump of every voucher is not a useful endpoint and invites scraping.
+`GET /vouchers` **requires at least one filter**. An unfiltered dump of every voucher is not a useful endpoint and invites scraping. It accepts `sort=createdAt|expiresAt|amount` and `order=asc|desc` (defaults: `createdAt`, `desc`). Amounts are compared with `BigInt`, so `amount` sorting is numeric rather than lexicographic.
 
 `/receipts` requires an exact `beneficiaryRef`. Because that value is an HMAC under a key held by the patient, the endpoint cannot be walked to enumerate people.
 

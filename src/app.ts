@@ -14,6 +14,7 @@ import { governanceRoutes } from './routes/governance.js';
 import { healthRoutes } from './routes/health.js';
 import { providerRoutes } from './routes/providers.js';
 import { receiptRoutes } from './routes/receipts.js';
+import { serviceRoutes } from './routes/services.js';
 import { voucherRoutes } from './routes/vouchers.js';
 
 export async function buildApp(
@@ -74,6 +75,7 @@ export async function buildApp(
 
   await app.register(healthRoutes);
   await app.register(providerRoutes);
+  await app.register(serviceRoutes);
   await app.register(voucherRoutes);
   await app.register(receiptRoutes);
   await app.register(governanceRoutes);

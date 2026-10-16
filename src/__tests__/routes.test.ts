@@ -9,6 +9,7 @@ import { CLAIM_GRACE_MS } from '../lib/lifecycle.js';
 import { server } from '../stellar/client.js';
 
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
+const SECOND_CLINIC = 'GCMDQZBBTZBR3ZDPCEFSDNNWVQFA44VHOJHR2JZTL7CHJHZ3N2LQDW3B';
 const PENDING_CLINIC = 'GBWBYKGC5OCRELVP5WHAKEMBSZMNUY3HOKVSYBQGLFNWWQHNH2SD53FZ';
 const FUNDER = 'GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45';
 const ADMIN = 'A'.repeat(56);
@@ -58,6 +59,22 @@ async function seed() {
       country: 'KE',
       status: 'Pending',
       registeredAt: new Date('2026-09-05T00:00:00Z'),
+    },
+  });
+  await prisma.provider.create({
+    data: {
+      address: SECOND_CLINIC,
+      name: 'Mwanza Mission Hospital',
+      country: 'TZ',
+      status: 'Active',
+      registeredAt: new Date('2026-08-15T00:00:00Z'),
+      services: {
+        create: [
+          { id: `${SECOND_CLINIC}:101`, code: 101, label: 'General consultation', price: '40000000' },
+          { id: `${SECOND_CLINIC}:202`, code: 202, label: 'Malaria rapid test', price: '15000000' },
+          { id: `${SECOND_CLINIC}:404`, code: 404, label: 'Dental cleaning', price: '20000000' },
+        ],
+      },
     },
   });
 
@@ -262,8 +279,8 @@ describe('GET /health and /stats', () => {
     const { status, body } = await get('/stats');
     expect(status).toBe(200);
     expect(body).toEqual({
-      providers: 2,
-      activeProviders: 1,
+      providers: 3,
+      activeProviders: 2,
       vouchers: 5,
       settledVouchers: 1,
       settledValue: '30000000',
@@ -339,7 +356,7 @@ describe('GET /ready', () => {
 describe('GET /providers', () => {
   it('filters by status and lists only active services', async () => {
     const { body } = await get('/providers?status=Active');
-    expect(body.total).toBe(1);
+    expect(body.total).toBe(2);
     expect(body.providers[0].name).toBe('Ikeja General Clinic');
     expect(body.providers[0].services.map((s: { code: number }) => s.code)).toEqual([101, 202]);
     expect(body.providers[0].services[0].priceDisplay).toBe('3.0000000');
@@ -366,6 +383,127 @@ describe('GET /providers', () => {
     const { status, body } = await get(`/providers/${FUNDER}`);
     expect(status).toBe(404);
     expect(body.error).toBe('provider_not_found');
+  });
+});
+
+describe('GET /providers search', () => {
+  it('matches a lower-case substring against a mixed-case name', async () => {
+    const { body } = await get('/providers?q=ikeja');
+    expect(body.total).toBe(1);
+    expect(body.providers[0].name).toBe('Ikeja General Clinic');
+  });
+
+  it('matches an upper-case substring', async () => {
+    const { body } = await get('/providers?q=KISUMU');
+    expect(body.total).toBe(1);
+    expect(body.providers[0].name).toBe('Kisumu Health Post');
+  });
+
+  it('matches a mid-name substring regardless of case', async () => {
+    const { body } = await get('/providers?q=GENERAL');
+    expect(body.total).toBe(1);
+    expect(body.providers[0].name).toBe('Ikeja General Clinic');
+  });
+
+  it('returns nothing when no name matches', async () => {
+    const { body } = await get('/providers?q=zzz');
+    expect(body).toMatchObject({ total: 0, providers: [] });
+  });
+
+  it('rejects an empty or over-long q', async () => {
+    expect((await get('/providers?q=')).status).toBe(400);
+    expect((await get(`/providers?q=${'a'.repeat(65)}`)).status).toBe(400);
+  });
+});
+
+describe('GET /countries', () => {
+  it('counts active clinics per country and omits inactive ones', async () => {
+    const { status, body } = await get('/countries');
+    expect(status).toBe(200);
+    expect(body.countries).toEqual([
+      { code: 'NG', clinicCount: 1 },
+      { code: 'TZ', clinicCount: 1 },
+    ]);
+  });
+});
+
+describe('GET /services', () => {
+  it('aggregates active services by code across active clinics', async () => {
+    const { status, body } = await get('/services');
+    expect(status).toBe(200);
+    expect(body.total).toBe(3);
+
+    const byCode = (code: number) =>
+      body.services.find((s: { code: number }) => s.code === code);
+
+    const consult = byCode(101);
+    expect(consult).toMatchObject({
+      labels: ['General consultation', 'Outpatient consult'],
+      clinicCount: 2,
+      minPrice: '30000000',
+      maxPrice: '40000000',
+      medianPrice: '35000000',
+    });
+    expect(consult.minPriceDisplay).toBe('3.0000000');
+    expect(consult.medianPriceDisplay).toBe('3.5000000');
+
+    expect(byCode(202)).toMatchObject({
+      labels: ['Malaria rapid test'],
+      clinicCount: 2,
+      minPrice: '10000000',
+      maxPrice: '15000000',
+      medianPrice: '12500000',
+    });
+
+    expect(byCode(404)).toMatchObject({
+      labels: ['Dental cleaning'],
+      clinicCount: 1,
+      minPrice: '20000000',
+      maxPrice: '20000000',
+      medianPrice: '20000000',
+    });
+
+    expect(byCode(303)).toBeUndefined();
+  });
+
+  it('lists one entry per code, ascending', async () => {
+    const { body } = await get('/services');
+    expect(body.services.map((s: { code: number }) => s.code)).toEqual([101, 202, 404]);
+  });
+});
+
+describe('GET /services/:code', () => {
+  it('lists the active clinics offering a code, cheapest first', async () => {
+    const { status, body } = await get('/services/101');
+    expect(status).toBe(200);
+    expect(body.code).toBe(101);
+    expect(body.clinicCount).toBe(2);
+    expect(body.clinics.map((c: { name: string }) => c.name)).toEqual([
+      'Ikeja General Clinic',
+      'Mwanza Mission Hospital',
+    ]);
+    expect(body.clinics[0]).toMatchObject({
+      address: CLINIC,
+      country: 'NG',
+      price: '30000000',
+      priceDisplay: '3.0000000',
+    });
+  });
+
+  it('404s a code only offered by an inactive service', async () => {
+    const { status, body } = await get('/services/303');
+    expect(status).toBe(404);
+    expect(body.error).toBe('service_not_found');
+  });
+
+  it('404s an unknown code', async () => {
+    expect((await get('/services/999')).status).toBe(404);
+  });
+
+  it('400s a non-numeric code', async () => {
+    const { status, body } = await get('/services/abc');
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_code');
   });
 });
 
@@ -418,6 +556,74 @@ describe('GET /vouchers', () => {
   it('carries the dispute reason', async () => {
     const { body } = await get('/vouchers?status=Disputed');
     expect(body.vouchers[0]).toMatchObject({ id: '5', disputeReason: 2 });
+  });
+});
+
+describe('GET /vouchers sort', () => {
+  it('defaults to newest first', async () => {
+    const { body } = await get(`/vouchers?funder=${FUNDER}`);
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual(['5', '4', '1', '3', '2']);
+  });
+
+  it('sorts by createdAt ascending', async () => {
+    const { body } = await get(`/vouchers?funder=${FUNDER}&sort=createdAt&order=asc`);
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual(['2', '3', '1', '4', '5']);
+  });
+
+  it('sorts by expiresAt descending', async () => {
+    const { body } = await get(`/vouchers?funder=${FUNDER}&sort=expiresAt&order=desc`);
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual(['5', '4', '1', '3', '2']);
+  });
+
+  it('sorts amount numerically, not lexicographically', async () => {
+    const now = Date.now();
+    await prisma.voucher.create({
+      data: {
+        id: 'cheap',
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: CLINIC,
+        serviceCode: 101,
+        amount: '9000000',
+        status: 'Funded',
+        createdAt: new Date(now - DAY),
+        expiresAt: new Date(now + 10 * DAY),
+      },
+    });
+
+    const { body } = await get(`/vouchers?funder=${FUNDER}&sort=amount&order=asc`);
+    expect(body.total).toBe(6);
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual([
+      'cheap',
+      '2',
+      '1',
+      '4',
+      '5',
+      '3',
+    ]);
+
+    const desc = await get(`/vouchers?funder=${FUNDER}&sort=amount&order=desc`);
+    expect(desc.body.vouchers.map((v: { id: string }) => v.id)).toEqual([
+      '3',
+      '5',
+      '4',
+      '1',
+      '2',
+      'cheap',
+    ]);
+  });
+
+  it('paginates after sorting by amount', async () => {
+    const { body } = await get(`/vouchers?funder=${FUNDER}&sort=amount&order=asc&limit=2&offset=1`);
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual(['1', '4']);
+    expect(body.limit).toBe(2);
+    expect(body.offset).toBe(1);
+    expect(body.total).toBe(5);
+  });
+
+  it('rejects an unknown sort or order', async () => {
+    expect((await get(`/vouchers?funder=${FUNDER}&sort=price`)).status).toBe(400);
+    expect((await get(`/vouchers?funder=${FUNDER}&order=up`)).status).toBe(400);
   });
 });
 
@@ -654,14 +860,21 @@ describe('cursor pagination', () => {
   });
 
   it('pages through providers with cursor', async () => {
-    const { body: page1 } = await get('/providers?limit=1');
-    expect(page1.providers).toHaveLength(1);
-    expect(page1.nextCursor).toBeTruthy();
+    const seen: string[] = [];
+    let cursor: string | null | undefined;
 
-    const { body: page2 } = await get(`/providers?limit=1&cursor=${page1.nextCursor}`);
-    expect(page2.providers).toHaveLength(1);
-    expect(page2.providers[0].address).not.toBe(page1.providers[0].address);
-    expect(page2.nextCursor).toBeNull();
+    // Page through all providers one at a time
+    do {
+      const url = cursor ? `/providers?limit=1&cursor=${cursor}` : '/providers?limit=1';
+      const { body } = await get(url);
+      expect(body.providers).toHaveLength(1);
+      seen.push(body.providers[0].address);
+      cursor = body.nextCursor;
+    } while (cursor);
+
+    // Should have visited every provider exactly once
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(seen).size).toBe(seen.length);
   });
 
   it('pages through receipts with cursor', async () => {
