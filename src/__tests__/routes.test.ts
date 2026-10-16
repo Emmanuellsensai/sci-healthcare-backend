@@ -233,6 +233,26 @@ beforeEach(async () => {
   await seed();
 });
 
+describe('OpenAPI spec', () => {
+  it('serves a valid spec at /openapi.json', async () => {
+    const res = await app.inject({ method: 'GET', url: '/openapi.json' });
+    expect(res.statusCode).toBe(200);
+    const spec = res.json();
+    expect(spec.openapi).toMatch(/^3\./);
+    expect(spec.info.title).toBe('SCI Healthcare API');
+    expect(spec.paths['/vouchers']).toBeDefined();
+    expect(spec.paths['/providers']).toBeDefined();
+    expect(spec.paths['/receipts']).toBeDefined();
+    expect(spec.paths['/governance']).toBeDefined();
+  });
+
+  it('serves Swagger UI at /docs', async () => {
+    const res = await app.inject({ method: 'GET', url: '/docs' });
+    // swagger-ui redirects to /docs/ or returns HTML
+    expect([200, 302]).toContain(res.statusCode);
+  });
+});
+
 describe('GET /health and /stats', () => {
   it('reports liveness', async () => {
     expect(await get('/health')).toEqual({ status: 200, body: { status: 'ok' } });

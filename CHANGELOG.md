@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **OpenAPI spec and Swagger UI**: `@fastify/swagger` generates the spec from Zod schemas. Served at `/docs` (Swagger UI) and `/openapi.json` (raw spec). Amount fields documented as decimal strings.
+- **Cursor pagination**: All list endpoints accept `cursor` and `limit`. Responses carry `nextCursor` (null when exhausted). Cursors encode `(createdAt, id)` as base64url. Offset pagination kept with a `Deprecation` header for one release.
+- **RPC retention gap detection**: The indexer detects when its cursor falls outside the RPC retention window, marks itself degraded (`gap` flag in `IndexerState`), and `/ready` returns 503 with gap details and a pointer to `docs/RUNBOOK.md`.
+- **Backfill command**: `npm run indexer:backfill -- --from <ledger> [--to <ledger>]` replays events without touching the cursor. Idempotent; refuses to start before the RPC retention window.
+- **`docs/RUNBOOK.md`**: Recovery procedures for the retention gap.
 - **GET /receipts?provider=**: List receipts by clinic/provider. Beneficiary references omitted in this view.
 - **GET /receipts/:voucherId**: Fetch a single receipt by voucher ID for shareable receipt pages and verification. No beneficiary reference in response.
 - **GET /vouchers/due?within=72h**: Vouchers needing action soon (expiring, becoming refundable, or settleable) with funder or provider filter. Uses lifecycle logic from `src/lib/lifecycle.ts` so API and contracts agree.
@@ -12,6 +17,8 @@
 - **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
 
 ### Changed
+- **List endpoints**: Prefer `cursor`/`limit` over `offset`/`limit`. Offset pagination still works but returns a `Deprecation` header.
+- **`IndexerState` schema**: three nullable columns added (`gap`, `gapOldestLedger`, `gapCursorLedger`); `prisma db push` adds them in place.
 - **GET /receipts**: Now requires exactly one of `beneficiaryRef` or `provider` query parameters.
 - **GET /vouchers**: Status filter now accepts comma-separated values (e.g., `Claimed,Attested`) instead of a single value.
 - **Indexer logs**: skipped events now include the transaction hash and ledger; an unknown event name is warned once per process instead of silently ignored.

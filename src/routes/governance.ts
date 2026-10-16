@@ -22,7 +22,13 @@ type Row = {
  * latest proposal or acceptance decides the current state.
  */
 export async function governanceRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/governance', async () => {
+  app.get('/governance', {
+    schema: {
+      tags: ['governance'],
+      summary: 'Admin history for each contract',
+      description: 'Who controls each contract, and how that changed.',
+    },
+  }, async () => {
     const events = await prisma.governanceEvent.findMany({
       orderBy: [{ ledger: 'asc' }, { id: 'asc' }],
     });

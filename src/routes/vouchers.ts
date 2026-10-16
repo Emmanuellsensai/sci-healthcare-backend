@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
@@ -39,7 +40,16 @@ const dueQuery = z.object({
 });
 
 export async function voucherRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/vouchers', async (req, reply) => {
+  const f = app.withTypeProvider<ZodTypeProvider>();
+
+  f.get('/vouchers', {
+    schema: {
+      tags: ['vouchers'],
+      summary: 'List vouchers',
+      description: 'Returns vouchers matching the given filters. At least one filter is required.',
+      querystring: listQuery,
+    },
+  }, async (req, reply) => {
     const parsed = listQuery.safeParse(req.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
@@ -112,7 +122,14 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     return { total, limit, offset, vouchers: rows.map((v) => serialise(v, labels)) };
   });
 
-  app.get('/vouchers/due', async (req, reply) => {
+  f.get('/vouchers/due', {
+    schema: {
+      tags: ['vouchers'],
+      summary: 'Vouchers due for action',
+      description: 'Returns vouchers expiring, becoming refundable, or settleable within the given window.',
+      querystring: dueQuery,
+    },
+  }, async (req, reply) => {
     const parsed = dueQuery.safeParse(req.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
@@ -159,7 +176,14 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     return { total: due.length, vouchers: due };
   });
 
-  app.get('/vouchers/:id', async (req, reply) => {
+  f.get('/vouchers/:id', {
+    schema: {
+      tags: ['vouchers'],
+      summary: 'Get a voucher by ID',
+      description: 'Returns a single voucher with its receipt (if settled).',
+      params: z.object({ id: z.string().describe('On-chain voucher ID') }),
+    },
+  }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const v = await prisma.voucher.findUnique({
       where: { id },

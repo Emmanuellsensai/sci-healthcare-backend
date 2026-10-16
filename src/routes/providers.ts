@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
@@ -15,7 +16,16 @@ const listQuery = z.object({
 });
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/providers', async (req, reply) => {
+  const f = app.withTypeProvider<ZodTypeProvider>();
+
+  f.get('/providers', {
+    schema: {
+      tags: ['providers'],
+      summary: 'List providers',
+      description: 'Returns healthcare providers matching the given filters.',
+      querystring: listQuery,
+    },
+  }, async (req, reply) => {
     const parsed = listQuery.safeParse(req.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
@@ -94,7 +104,14 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     return { total, limit, offset, providers: rows.map(formatProvider) };
   });
 
-  app.get('/providers/:address', async (req, reply) => {
+  f.get('/providers/:address', {
+    schema: {
+      tags: ['providers'],
+      summary: 'Get a provider by address',
+      description: 'Returns a single provider with its full service catalogue.',
+      params: z.object({ address: z.string().length(56).describe('Stellar address') }),
+    },
+  }, async (req, reply) => {
     const { address } = req.params as { address: string };
     const p = await prisma.provider.findUnique({
       where: { address },
@@ -124,7 +141,14 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
    * A clinic suspended twice a year reads very differently from one never
    * suspended, and the current status alone cannot tell them apart.
    */
-  app.get('/providers/:address/history', async (req, reply) => {
+  f.get('/providers/:address/history', {
+    schema: {
+      tags: ['providers'],
+      summary: 'Provider status history',
+      description: 'Every status transition observed for a clinic, oldest first.',
+      params: z.object({ address: z.string().length(56).describe('Stellar address') }),
+    },
+  }, async (req, reply) => {
     const { address } = req.params as { address: string };
     const provider = await prisma.provider.findUnique({
       where: { address },
@@ -148,7 +172,17 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** Every observed price for one service, oldest first. */
-  app.get('/providers/:address/services/:code/history', async (req, reply) => {
+  f.get('/providers/:address/services/:code/history', {
+    schema: {
+      tags: ['providers'],
+      summary: 'Service price history',
+      description: 'Every observed price change for one service, oldest first.',
+      params: z.object({
+        address: z.string().length(56).describe('Stellar address'),
+        code: z.string().describe('Service code'),
+      }),
+    },
+  }, async (req, reply) => {
     const { address, code } = req.params as { address: string; code: string };
     const serviceCode = Number(code);
     if (!Number.isInteger(serviceCode) || serviceCode < 0) {

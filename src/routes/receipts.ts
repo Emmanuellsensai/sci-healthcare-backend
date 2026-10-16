@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
@@ -25,15 +26,17 @@ const voucherIdParam = z.object({
 });
 
 export async function receiptRoutes(app: FastifyInstance): Promise<void> {
-  /**
-   * A patient's care history.
-   *
-   * Requires an exact beneficiary reference. Because that reference is an
-   * HMAC computed under a key the patient holds, only someone who already
-   * knows the patient's identifier and key can construct it — the endpoint
-   * cannot be walked to enumerate patients.
-   */
-  app.get('/receipts', async (req, reply) => {
+  const f = app.withTypeProvider<ZodTypeProvider>();
+
+  f.get('/receipts', {
+    schema: {
+      tags: ['receipts'],
+      summary: 'List receipts',
+      description:
+        'A patient\'s care history. Requires exactly one of beneficiaryRef or provider.',
+      querystring: listQuery,
+    },
+  }, async (req, reply) => {
     const parsed = listQuery.safeParse(req.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
@@ -122,13 +125,14 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  /**
-   * Single receipt by voucher ID.
-   *
-   * Used for shareable receipt pages and verification. No beneficiary
-   * reference is included in the response.
-   */
-  app.get('/receipts/:voucherId', async (req, reply) => {
+  f.get('/receipts/:voucherId', {
+    schema: {
+      tags: ['receipts'],
+      summary: 'Get a receipt by voucher ID',
+      description: 'Single receipt for verification. No beneficiary reference in the response.',
+      params: voucherIdParam,
+    },
+  }, async (req, reply) => {
     const parsed = voucherIdParam.safeParse(req.params);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
