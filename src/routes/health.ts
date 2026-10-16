@@ -34,10 +34,22 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       checks.latestLedger = latest.sequence;
       checks.indexedLedger = state?.lastLedger ?? null;
       checks.lagLedgers = lag;
-      // Configurable: roughly 5s per ledger, so the default of 120 ledgers
-      // is about 10 minutes behind.
       checks.maxLagLedgers = env.READY_MAX_LAG_LEDGERS;
-      if (lag !== null && lag > env.READY_MAX_LAG_LEDGERS) {
+
+      if (state?.gap) {
+        healthy = false;
+        checks.indexer = 'gap';
+        checks.gap = {
+          detected: true,
+          cursorLedger: state.gapCursorLedger,
+          oldestAvailable: state.gapOldestLedger,
+          message:
+            'Indexer cursor fell outside the RPC retention window. ' +
+            'Restore a database snapshot at the cursor ledger, or ' +
+            'accept the gap and resume from the oldest available ledger. ' +
+            'See docs/RUNBOOK.md.',
+        };
+      } else if (lag !== null && lag > env.READY_MAX_LAG_LEDGERS) {
         healthy = false;
         checks.indexer = 'lagging';
       } else {

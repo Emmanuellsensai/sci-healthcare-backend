@@ -293,6 +293,26 @@ describe('GET /ready', () => {
       maxLagLedgers: env.READY_MAX_LAG_LEDGERS,
     });
   });
+
+  it('returns 503 with gap details when the indexer has a retention gap', async () => {
+    await prisma.indexerState.upsert({
+      where: { id: 1 },
+      create: { id: 1, lastLedger: 50, gap: true, gapOldestLedger: 200, gapCursorLedger: 50 },
+      update: { lastLedger: 50, gap: true, gapOldestLedger: 200, gapCursorLedger: 50, leaseOwner: null, leaseExpiresAt: null },
+    });
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1000 } as never);
+
+    const { status, body } = await get('/ready');
+    expect(status).toBe(503);
+    expect(body.status).toBe('degraded');
+    expect(body.checks.indexer).toBe('gap');
+    expect(body.checks.gap).toMatchObject({
+      detected: true,
+      cursorLedger: 50,
+      oldestAvailable: 200,
+    });
+    expect(body.checks.gap.message).toContain('RUNBOOK');
+  });
 });
 
 describe('GET /providers', () => {

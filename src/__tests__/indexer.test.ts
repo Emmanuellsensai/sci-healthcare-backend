@@ -119,6 +119,47 @@ describe('indexer logs', () => {
   });
 });
 
+describe('RPC retention gap', () => {
+  it('marks the indexer as degraded when cursor is older than oldestLedger', async () => {
+    vi.spyOn(server, 'getHealth').mockResolvedValue({
+      oldestLedger: 200,
+      latestLedger: 1000,
+    } as never);
+    stubEvents([], 100);
+    const log = fakeLog();
+    const indexer = new Indexer(log);
+
+    await indexer.tick();
+
+    const state = await prisma.indexerState.findUniqueOrThrow({ where: { id: 1 } });
+    expect(state.gap).toBe(true);
+    expect(state.gapOldestLedger).toBe(200);
+    expect(state.gapCursorLedger).toBe(100);
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ startLedger: 101, oldestLedger: 200 }),
+      expect.stringContaining('retention window'),
+    );
+  });
+
+  it('logs the gap error only once', async () => {
+    vi.spyOn(server, 'getHealth').mockResolvedValue({
+      oldestLedger: 200,
+      latestLedger: 1000,
+    } as never);
+    stubEvents([], 100);
+    const log = fakeLog();
+    const indexer = new Indexer(log);
+
+    await indexer.tick();
+    await indexer.tick();
+
+    const gapErrors = log.error.mock.calls.filter(
+      ([, msg]) => typeof msg === 'string' && msg.includes('retention window'),
+    );
+    expect(gapErrors).toHaveLength(1);
+  });
+});
+
 describe('single-writer lease', () => {
   it('logs standby and polls nothing while another indexer is active', async () => {
     stubEvents([], 100);

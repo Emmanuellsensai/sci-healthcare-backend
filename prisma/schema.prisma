@@ -147,4 +147,10 @@ model IndexerState {
   leaseOwner     String?
   /// After this instant the lease is free for another instance to take.
   leaseExpiresAt DateTime?
+  /// True when the cursor fell outside the RPC retention window.
+  gap            Boolean   @default(false)
+  /// Oldest ledger the RPC had when the gap was detected.
+  gapOldestLedger Int?
+  /// Cursor ledger at the time the gap was detected.
+  gapCursorLedger Int?
 }

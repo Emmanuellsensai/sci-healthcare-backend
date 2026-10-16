@@ -191,11 +191,25 @@ export class Indexer {
 
     const health = await server.getHealth();
     if (startLedger < health.oldestLedger) {
-      this.log.error(
-        { startLedger, oldestLedger: health.oldestLedger },
-        'indexer has fallen outside the RPC retention window; ' +
-          'reindex from a snapshot or a later ledger',
-      );
+      if (!state.gap) {
+        await prisma.indexerState.update({
+          where: { id: 1 },
+          data: {
+            gap: true,
+            gapOldestLedger: health.oldestLedger,
+            gapCursorLedger: state.lastLedger,
+          },
+        });
+        this.log.error(
+          {
+            startLedger,
+            oldestLedger: health.oldestLedger,
+            cursorLedger: state.lastLedger,
+          },
+          'indexer has fallen outside the RPC retention window; ' +
+            'restore a database snapshot or accept a gap — see docs/RUNBOOK.md',
+        );
+      }
       return 0;
     }
     if (startLedger > health.latestLedger) return 0;
