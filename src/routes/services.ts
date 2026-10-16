@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
+import { ApiError } from '../lib/errors.js';
 
 type CatalogueRow = {
   code: number;
@@ -47,18 +48,18 @@ export async function serviceRoutes(app: FastifyInstance): Promise<void> {
     return { total: services.length, services };
   });
 
-  app.get('/services/:code', async (req, reply) => {
+  app.get('/services/:code', async (req) => {
     const { code } = req.params as { code: string };
     const serviceCode = Number(code);
     if (!Number.isInteger(serviceCode) || serviceCode < 0) {
-      return reply.code(400).send({ error: 'invalid_code' });
+      throw new ApiError(400, 'invalid_code', 'code must be a non-negative integer');
     }
 
     const rows = await prisma.service.findMany({
       where: { code: serviceCode, active: true, provider: { status: 'Active' } },
       include: { provider: { select: { address: true, name: true, country: true } } },
     });
-    if (rows.length === 0) return reply.code(404).send({ error: 'service_not_found' });
+    if (rows.length === 0) throw new ApiError(404, 'service_not_found', 'Service not found');
 
     const clinics = rows
       .map((row) => ({

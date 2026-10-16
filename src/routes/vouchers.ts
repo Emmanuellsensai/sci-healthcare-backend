@@ -1,11 +1,15 @@
+import { Readable } from 'node:stream';
+
+import type { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
-import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
+import { csvRow } from '../lib/csv.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
+import { ApiError } from '../lib/errors.js';
 import { isRefundable, isSettleable, refundableAt } from '../lib/lifecycle.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 
@@ -35,6 +39,42 @@ const listQuery = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+/** The CSV export takes the filters but none of the paging or sort options. */
+const csvQuery = z.object({
+  funder: z.string().length(56).optional(),
+  provider: z.string().length(56).optional(),
+  beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
+  status: statusList.optional(),
+});
+
+/** Columns exported as CSV. Deliberately no beneficiary reference. */
+const CSV_COLUMNS = [
+  'id',
+  'funder',
+  'providerAddress',
+  'providerName',
+  'providerCountry',
+  'serviceCode',
+  'serviceLabel',
+  'amount',
+  'amountDisplay',
+  'status',
+  'createdAt',
+  'expiresAt',
+  'claimedAt',
+  'attestedAt',
+  'disputeDeadline',
+  'disputeReason',
+  'settledNet',
+  'settledFee',
+  'refundableAt',
+  'isSettleable',
+  'isRefundable',
+];
+
+/** Rows fetched per database round trip; keeps export memory flat. */
+const CSV_BATCH_SIZE = 500;
+
 const dueQuery = z.object({
   funder: z.string().length(56).optional(),
   provider: z.string().length(56).optional(),
@@ -42,29 +82,28 @@ const dueQuery = z.object({
 });
 
 export async function voucherRoutes(app: FastifyInstance): Promise<void> {
-  const f = app.withTypeProvider<ZodTypeProvider>();
+  app.get('/vouchers', async (req) => {
+    const parsed = listQuery.safeParse(req.query);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { funder, provider, beneficiaryRef, status, sort, order, cursor, limit, offset } =
+      parsed.data;
 
-  f.get('/vouchers', {
-    schema: {
-      tags: ['vouchers'],
-      summary: 'List vouchers',
-      description: 'Returns vouchers matching the given filters. At least one filter is required.',
-      querystring: listQuery,
-    },
-  }, async (req, reply) => {
-    const { funder, provider, beneficiaryRef, status, sort, order, cursor, limit, offset } = req.query as z.infer<typeof listQuery>;
-
+    // At least one selector is required. An unfiltered dump of every
+    // voucher in the system is not a useful endpoint and invites scraping.
     if (!funder && !provider && !beneficiaryRef && !status) {
-      return reply.code(400).send({
-        error: 'filter_required',
-        message: 'Provide at least one of: funder, provider, beneficiaryRef, status',
-      });
+      throw new ApiError(
+        400,
+        'filter_required',
+        'Provide at least one of: funder, provider, beneficiaryRef, status',
+      );
     }
 
     if (cursor) {
       const decoded = decodeCursor(cursor);
       if (!decoded) {
-        return reply.code(400).send({ error: 'invalid_cursor' });
+        throw new ApiError(400, 'invalid_cursor', 'Invalid cursor');
       }
 
       const cursorDate = new Date(decoded.createdAt);
@@ -102,9 +141,6 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
       ...(status ? { status: { in: status } } : {}),
     };
 
-    const deprecation = offset > 0 ? { 'Deprecation': 'true' } : undefined;
-    if (deprecation) reply.headers(deprecation);
-
     const total = await prisma.voucher.count({ where });
 
     let rows: Row[];
@@ -132,21 +168,54 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     return { total, limit, offset, nextCursor, vouchers: page.map((v) => serialise(v, labels)) };
   });
 
-  f.get('/vouchers/due', {
-    schema: {
-      tags: ['vouchers'],
-      summary: 'Vouchers due for action',
-      description: 'Returns vouchers expiring, becoming refundable, or settleable within the given window.',
-      querystring: dueQuery,
-    },
-  }, async (req, reply) => {
-    const { funder, provider, within } = req.query as z.infer<typeof dueQuery>;
+  /**
+   * The same vouchers as JSON `GET /vouchers`, as a streamed CSV download.
+   *
+   * At least one filter is required here too, so the export cannot become
+   * an unauthenticated dump of every voucher. Rows are read in batches with
+   * a cursor and written out as they arrive: the whole export never has to
+   * fit in memory, however many rows match. There is deliberately no
+   * beneficiary reference column.
+   */
+  app.get('/vouchers.csv', async (req, reply) => {
+    const parsed = csvQuery.safeParse(req.query);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { funder, provider, beneficiaryRef, status } = parsed.data;
+
+    if (!funder && !provider && !beneficiaryRef && !status) {
+      throw new ApiError(
+        400,
+        'filter_required',
+        'Provide at least one of: funder, provider, beneficiaryRef, status',
+      );
+    }
+
+    const where: Prisma.VoucherWhereInput = {
+      ...(funder ? { funder } : {}),
+      ...(provider ? { providerAddress: provider } : {}),
+      ...(beneficiaryRef ? { beneficiaryRef } : {}),
+      ...(status ? { status: { in: status } } : {}),
+    };
+
+    reply
+      .header('content-type', 'text/csv; charset=utf-8')
+      .header('content-disposition', 'attachment; filename="vouchers.csv"')
+      .header('cache-control', 'no-store');
+
+    return reply.send(Readable.from(voucherCsv(where), { objectMode: false }));
+  });
+
+  app.get('/vouchers/due', async (req) => {
+    const parsed = dueQuery.safeParse(req.query);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { funder, provider, within } = parsed.data;
 
     if (!funder && !provider) {
-      return reply.code(400).send({
-        error: 'filter_required',
-        message: 'Provide at least one of: funder, provider',
-      });
+      throw new ApiError(400, 'filter_required', 'Provide at least one of: funder, provider');
     }
 
     const now = Date.now();
@@ -182,20 +251,13 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     return { total: due.length, vouchers: due };
   });
 
-  f.get('/vouchers/:id', {
-    schema: {
-      tags: ['vouchers'],
-      summary: 'Get a voucher by ID',
-      description: 'Returns a single voucher with its receipt (if settled).',
-      params: z.object({ id: z.string().describe('On-chain voucher ID') }),
-    },
-  }, async (req, reply) => {
+  app.get('/vouchers/:id', async (req) => {
     const { id } = req.params as { id: string };
     const v = await prisma.voucher.findUnique({
       where: { id },
       include: { provider: true },
     });
-    if (!v) return reply.code(404).send({ error: 'voucher_not_found' });
+    if (!v) throw new ApiError(404, 'voucher_not_found', 'Voucher not found');
 
     const [receipt, labels] = await Promise.all([
       prisma.receipt.findUnique({ where: { voucherId: id } }),
@@ -203,6 +265,56 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     ]);
     return { ...serialise(v, labels), receipt };
   });
+}
+
+/**
+ * Yields the CSV one line at a time. Rows are paged by voucher id, which is
+ * unique and ordered, so a batch boundary can never skip or duplicate a row.
+ */
+async function* voucherCsv(where: Prisma.VoucherWhereInput): AsyncGenerator<string> {
+  yield `${csvRow(CSV_COLUMNS)}\r\n`;
+
+  let cursor: string | undefined;
+  for (;;) {
+    const batch = await prisma.voucher.findMany({
+      where,
+      include: { provider: true },
+      orderBy: { id: 'asc' },
+      take: CSV_BATCH_SIZE,
+      ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
+    });
+    if (batch.length === 0) return;
+
+    const labels = await serviceLabels(batch);
+    for (const v of batch) {
+      yield `${csvRow([
+        v.id,
+        v.funder,
+        v.providerAddress,
+        v.provider.name,
+        v.provider.country,
+        v.serviceCode,
+        labels.get(serviceKey(v.providerAddress, v.serviceCode)) ?? null,
+        v.amount,
+        fromBaseUnits(v.amount),
+        v.status,
+        v.createdAt,
+        v.expiresAt,
+        v.claimedAt,
+        v.attestedAt,
+        v.disputeDeadline,
+        v.disputeReason,
+        v.settledNet,
+        v.settledFee,
+        refundableAt(v),
+        isSettleable(v),
+        isRefundable(v),
+      ])}\r\n`;
+    }
+
+    if (batch.length < CSV_BATCH_SIZE) return;
+    cursor = batch[batch.length - 1]!.id;
+  }
 }
 
 function parseWithin(within: string, now: number): number {

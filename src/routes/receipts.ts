@@ -1,11 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
+import { ApiError } from '../lib/errors.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 
 const listQuery = z
@@ -26,18 +26,20 @@ const voucherIdParam = z.object({
 });
 
 export async function receiptRoutes(app: FastifyInstance): Promise<void> {
-  const f = app.withTypeProvider<ZodTypeProvider>();
-
-  f.get('/receipts', {
-    schema: {
-      tags: ['receipts'],
-      summary: 'List receipts',
-      description:
-        'A patient\'s care history. Requires exactly one of beneficiaryRef or provider.',
-      querystring: listQuery,
-    },
-  }, async (req, reply) => {
-    const { beneficiaryRef, provider, cursor, limit, offset } = req.query as z.infer<typeof listQuery>;
+  /**
+   * A patient's care history.
+   *
+   * Requires an exact beneficiary reference. Because that reference is an
+   * HMAC computed under a key the patient holds, only someone who already
+   * knows the patient's identifier and key can construct it — the endpoint
+   * cannot be walked to enumerate patients.
+   */
+  app.get('/receipts', async (req) => {
+    const parsed = listQuery.safeParse(req.query);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { beneficiaryRef, provider, cursor, limit, offset } = parsed.data;
 
     const baseWhere = beneficiaryRef
       ? { beneficiaryRef }
@@ -45,14 +47,17 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
 
     const isProviderView = Boolean(provider);
 
-    const formatReceipt = (r: {
-      voucherId: string;
-      providerAddress: string;
-      serviceCode: number;
-      amount: string;
-      settledAt: Date;
-      beneficiaryRef: string;
-    }, labels: Map<string, string>) => ({
+    const formatReceipt = (
+      r: {
+        voucherId: string;
+        providerAddress: string;
+        serviceCode: number;
+        amount: string;
+        settledAt: Date;
+        beneficiaryRef: string;
+      },
+      labels: Map<string, string>,
+    ) => ({
       voucherId: r.voucherId,
       providerAddress: r.providerAddress,
       serviceCode: r.serviceCode,
@@ -66,7 +71,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
     if (cursor) {
       const decoded = decodeCursor(cursor);
       if (!decoded) {
-        return reply.code(400).send({ error: 'invalid_cursor' });
+        throw new ApiError(400, 'invalid_cursor', 'Invalid cursor');
       }
       const cursorDate = new Date(decoded.createdAt);
       const where = {
@@ -88,9 +93,6 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       const nextCursor = hasNext && last ? encodeCursor(last.settledAt, last.voucherId) : null;
       return { limit, nextCursor, receipts: page.map((r) => formatReceipt(r, labels)) };
     }
-
-    const deprecation = offset > 0 ? { 'Deprecation': 'true' } : undefined;
-    if (deprecation) reply.headers(deprecation);
 
     const [rows, total, spend] = await Promise.all([
       prisma.receipt.findMany({
@@ -126,20 +128,23 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  f.get('/receipts/:voucherId', {
-    schema: {
-      tags: ['receipts'],
-      summary: 'Get a receipt by voucher ID',
-      description: 'Single receipt for verification. No beneficiary reference in the response.',
-      params: voucherIdParam,
-    },
-  }, async (req, reply) => {
-    const { voucherId } = req.params as z.infer<typeof voucherIdParam>;
+  /**
+   * Single receipt by voucher ID.
+   *
+   * Used for shareable receipt pages and verification. No beneficiary
+   * reference is included in the response.
+   */
+  app.get('/receipts/:voucherId', async (req) => {
+    const parsed = voucherIdParam.safeParse(req.params);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { voucherId } = parsed.data;
 
     const receipt = await prisma.receipt.findUnique({
       where: { voucherId },
     });
-    if (!receipt) return reply.code(404).send({ error: 'receipt_not_found' });
+    if (!receipt) throw new ApiError(404, 'receipt_not_found', 'Receipt not found');
 
     const labels = await serviceLabels([receipt]);
     return {

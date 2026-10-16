@@ -1,11 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
-import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { isPostgres } from '../lib/database.js';
+import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
+import { ApiError } from '../lib/errors.js';
 
 const listQuery = z.object({
   status: z.enum(['Pending', 'Active', 'Suspended']).optional(),
@@ -23,17 +23,12 @@ function nameContains(q: string): { contains: string; mode?: string } {
 }
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
-  const f = app.withTypeProvider<ZodTypeProvider>();
-
-  f.get('/providers', {
-    schema: {
-      tags: ['providers'],
-      summary: 'List providers',
-      description: 'Returns healthcare providers matching the given filters.',
-      querystring: listQuery,
-    },
-  }, async (req, reply) => {
-    const { status, country, q, cursor, limit, offset } = req.query as z.infer<typeof listQuery>;
+  app.get('/providers', async (req) => {
+    const parsed = listQuery.safeParse(req.query);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { status, country, q, cursor, limit, offset } = parsed.data;
 
     const formatProvider = (p: {
       address: string;
@@ -59,7 +54,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     if (cursor) {
       const decoded = decodeCursor(cursor);
       if (!decoded) {
-        return reply.code(400).send({ error: 'invalid_cursor' });
+        throw new ApiError(400, 'invalid_cursor', 'Invalid cursor');
       }
       const cursorDate = new Date(decoded.createdAt);
       const where = {
@@ -90,9 +85,6 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       ...(q ? { name: nameContains(q) } : {}),
     };
 
-    const deprecation = offset > 0 ? { 'Deprecation': 'true' } : undefined;
-    if (deprecation) reply.headers(deprecation);
-
     const [rows, total] = await Promise.all([
       prisma.provider.findMany({
         where,
@@ -112,20 +104,13 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     return { total, limit, offset, nextCursor, providers: page.map(formatProvider) };
   });
 
-  f.get('/providers/:address', {
-    schema: {
-      tags: ['providers'],
-      summary: 'Get a provider by address',
-      description: 'Returns a single provider with its full service catalogue.',
-      params: z.object({ address: z.string().length(56).describe('Stellar address') }),
-    },
-  }, async (req, reply) => {
+  app.get('/providers/:address', async (req) => {
     const { address } = req.params as { address: string };
     const p = await prisma.provider.findUnique({
       where: { address },
       include: { services: true },
     });
-    if (!p) return reply.code(404).send({ error: 'provider_not_found' });
+    if (!p) throw new ApiError(404, 'provider_not_found', 'Provider not found');
 
     return {
       address: p.address,
@@ -149,20 +134,13 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
    * A clinic suspended twice a year reads very differently from one never
    * suspended, and the current status alone cannot tell them apart.
    */
-  f.get('/providers/:address/history', {
-    schema: {
-      tags: ['providers'],
-      summary: 'Provider status history',
-      description: 'Every status transition observed for a clinic, oldest first.',
-      params: z.object({ address: z.string().length(56).describe('Stellar address') }),
-    },
-  }, async (req, reply) => {
+  app.get('/providers/:address/history', async (req) => {
     const { address } = req.params as { address: string };
     const provider = await prisma.provider.findUnique({
       where: { address },
       select: { address: true },
     });
-    if (!provider) return reply.code(404).send({ error: 'provider_not_found' });
+    if (!provider) throw new ApiError(404, 'provider_not_found', 'Provider not found');
 
     const changes = await prisma.providerStatusChange.findMany({
       where: { providerAddress: address },
@@ -180,28 +158,18 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** Every observed price for one service, oldest first. */
-  f.get('/providers/:address/services/:code/history', {
-    schema: {
-      tags: ['providers'],
-      summary: 'Service price history',
-      description: 'Every observed price change for one service, oldest first.',
-      params: z.object({
-        address: z.string().length(56).describe('Stellar address'),
-        code: z.string().describe('Service code'),
-      }),
-    },
-  }, async (req, reply) => {
+  app.get('/providers/:address/services/:code/history', async (req) => {
     const { address, code } = req.params as { address: string; code: string };
     const serviceCode = Number(code);
     if (!Number.isInteger(serviceCode) || serviceCode < 0) {
-      return reply.code(400).send({ error: 'invalid_code' });
+      throw new ApiError(400, 'invalid_code', 'code must be a non-negative integer');
     }
 
     const provider = await prisma.provider.findUnique({
       where: { address },
       select: { address: true },
     });
-    if (!provider) return reply.code(404).send({ error: 'provider_not_found' });
+    if (!provider) throw new ApiError(404, 'provider_not_found', 'Provider not found');
 
     const changes = await prisma.servicePriceChange.findMany({
       where: { providerAddress: address, code: serviceCode },

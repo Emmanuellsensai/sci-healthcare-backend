@@ -67,6 +67,30 @@ The cursor is guarded by a lease (stored on `IndexerState`). However many indexe
 
 ## API
 
+Every route is served under the canonical `/v1` prefix. The unversioned paths
+(`/vouchers`, `/providers`, …) remain as aliases for clients already deployed
+against them: each response on those paths carries `Deprecation: true` and a
+`Link: </v1/...>; rel="successor-version"` header. New integrations should
+target `/v1`.
+
+Every response carries an `X-Request-Id`. Send one and it is echoed (after
+validation); otherwise the server generates a UUID. The same value appears as
+`reqId` in the log line for the request, so an id from a user is enough to find
+the matching log entry.
+
+Errors all use one envelope, whatever layer rejected the request:
+
+```json
+{ "error": "invalid_query", "message": "Invalid query parameters", "details": [] }
+```
+
+`details` is present only when there is something structured to add (for
+example the Zod issues for a bad query). Error codes: `invalid_query`,
+`filter_required`, `invalid_code`, `provider_not_found`, `service_not_found`,
+`voucher_not_found`, `receipt_not_found`, `route_not_found`, `rate_limited`,
+`bad_request`, `internal_error`. A 5xx is always `internal_error`; the cause
+stays in the log, never in the response.
+
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Liveness |
@@ -80,19 +104,29 @@ The cursor is guarded by a lease (stored on `IndexerState`). However many indexe
 | `GET /services` | Active services grouped by code: labels, clinic count, min/max/median price |
 | `GET /services/:code` | Active clinics offering a service code with their prices, cheapest first |
 | `GET /vouchers` | Vouchers by `funder`, `provider`, `beneficiaryRef` or `status`, sorted by `sort`/`order` |
+| `GET /vouchers/due` | Vouchers needing action soon (expiring, refundable or settleable) within `within`, e.g. `72h` |
+| `GET /vouchers.csv` | Streamed CSV export matching the same filters as `GET /vouchers` |
 | `GET /vouchers/:id` | One voucher, with its care receipt if settled |
-| `GET /receipts?beneficiaryRef=` | A patient's settled care history |
+| `GET /receipts?beneficiaryRef=` / `?provider=` | A patient's settled care history, or a clinic's receipts |
+| `GET /receipts/:voucherId` | One receipt, for a shareable receipt page |
 | `GET /governance` | Current and pending admin per contract, plus the handover history |
 
 `GET /vouchers` **requires at least one filter**. An unfiltered dump of every voucher is not a useful endpoint and invites scraping. It accepts `sort=createdAt|expiresAt|amount` and `order=asc|desc` (defaults: `createdAt`, `desc`). Amounts are compared with `BigInt`, so `amount` sorting is numeric rather than lexicographic.
+
+`GET /vouchers.csv` takes the same `funder`, `provider`, `beneficiaryRef` and
+`status` filters (and also requires at least one). Rows are read in batches
+with a cursor and streamed as an RFC 4180 download, so the export never has to
+fit in memory however many vouchers match. It deliberately has **no beneficiary
+reference column**.
 
 `/receipts` requires an exact `beneficiaryRef`. Because that value is an HMAC under a key held by the patient, the endpoint cannot be walked to enumerate people.
 
 ### Example
 
 ```bash
-curl "http://localhost:8080/providers?status=Active" | jq
-curl "http://localhost:8080/vouchers?provider=GDOOCNK2...ZKBK" | jq
+curl "http://localhost:8080/v1/providers?status=Active" | jq
+curl "http://localhost:8080/v1/vouchers?provider=GDOOCNK2...ZKBK" | jq
+curl -o vouchers.csv "http://localhost:8080/v1/vouchers.csv?funder=GDUPJTF3...G45"
 ```
 
 ```json

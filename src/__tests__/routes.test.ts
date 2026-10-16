@@ -28,6 +28,53 @@ async function get(url: string) {
   return { status: res.statusCode, body: res.json() };
 }
 
+async function getCsv(url: string) {
+  const res = await app.inject({ method: 'GET', url });
+  return { status: res.statusCode, body: res.body, headers: res.headers, json: () => res.json() };
+}
+
+/** Parses RFC 4180 CSV into rows of cells, so tests exercise the real escaping. */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!;
+    if (quoted) {
+      if (char === '"') {
+        if (text[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else {
+          quoted = false;
+        }
+      } else {
+        cell += char;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (char === '\r' && text[i + 1] === '\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+      i++;
+    } else {
+      cell += char;
+    }
+  }
+  if (cell !== '' || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+}
+
 async function seed() {
   await prisma.provider.create({
     data: {
@@ -624,6 +671,110 @@ describe('GET /vouchers sort', () => {
   it('rejects an unknown sort or order', async () => {
     expect((await get(`/vouchers?funder=${FUNDER}&sort=price`)).status).toBe(400);
     expect((await get(`/vouchers?funder=${FUNDER}&order=up`)).status).toBe(400);
+  });
+});
+
+describe('GET /vouchers.csv', () => {
+  it('requires at least one filter, in the common error envelope', async () => {
+    const { status, json } = await getCsv('/vouchers.csv');
+    expect(status).toBe(400);
+    expect(json()).toMatchObject({ error: 'filter_required' });
+  });
+
+  it('streams the filtered vouchers as a CSV attachment', async () => {
+    const { status, headers, body } = await getCsv(`/vouchers.csv?funder=${FUNDER}`);
+    expect(status).toBe(200);
+    expect(headers['content-type']).toContain('text/csv');
+    expect(headers['content-disposition']).toContain('attachment');
+    expect(headers['cache-control']).toBe('no-store');
+
+    const rows = parseCsv(body);
+    const header = rows[0]!;
+    expect(header).toContain('id');
+    expect(header).toContain('amountDisplay');
+    expect(header).toContain('serviceLabel');
+    // Never a beneficiary reference column.
+    expect(header).not.toContain('beneficiaryRef');
+
+    const byId = new Map(rows.slice(1).map((r) => [r[0], r]));
+    expect([...byId.keys()].sort()).toEqual(['1', '2', '3', '4', '5']);
+    expect(byId.get('1')![header.indexOf('amount')]).toBe('30000000');
+    expect(byId.get('1')![header.indexOf('amountDisplay')]).toBe('3.0000000');
+    expect(byId.get('1')![header.indexOf('providerName')]).toBe('Ikeja General Clinic');
+    expect(byId.get('2')![header.indexOf('status')]).toBe('Funded');
+    expect(byId.get('5')![header.indexOf('disputeReason')]).toBe('2');
+  });
+
+  it('accepts the same filters as the JSON route', async () => {
+    const byStatus = parseCsv((await getCsv('/vouchers.csv?status=Funded')).body);
+    expect(byStatus.slice(1).map((r) => r[0])).toEqual(['2']);
+
+    const byProvider = parseCsv((await getCsv(`/vouchers.csv?provider=${SECOND_CLINIC}`)).body);
+    expect(byProvider).toHaveLength(1); // header only, nothing for this clinic
+  });
+
+  it('escapes commas, quotes and line breaks in cells', async () => {
+    const tricky = 'G'.repeat(56);
+    await prisma.provider.create({
+      data: {
+        address: tricky,
+        name: 'Clinic "A", Ltd\nSecond line',
+        country: 'NG',
+        status: 'Active',
+        registeredAt: new Date(),
+      },
+    });
+    await prisma.voucher.create({
+      data: {
+        id: 'csv-escape',
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: tricky,
+        serviceCode: 101,
+        amount: '10000000',
+        status: 'Funded',
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + DAY),
+      },
+    });
+
+    const { body } = await getCsv(`/vouchers.csv?provider=${tricky}`);
+    const rows = parseCsv(body);
+    expect(rows).toHaveLength(2);
+    const nameColumn = rows[0]!.indexOf('providerName');
+    expect(rows[1]![nameColumn]).toBe('Clinic "A", Ltd\nSecond line');
+  });
+
+  it('exports more rows than one batch, in cursor order, without gaps or repeats', async () => {
+    // 501 rows is one past the 500-row batch size, so the export has to
+    // continue from a cursor: a boundary that skipped or duplicated a row
+    // would show up here.
+    const now = Date.now();
+    await prisma.voucher.createMany({
+      data: Array.from({ length: 501 }, (_, i) => ({
+        id: `bulk-${String(i).padStart(4, '0')}`,
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: CLINIC,
+        serviceCode: 101,
+        amount: '1000000',
+        status: 'Funded',
+        createdAt: new Date(now - DAY),
+        expiresAt: new Date(now + DAY),
+      })),
+    });
+
+    const { status, body } = await getCsv(`/vouchers.csv?funder=${FUNDER}`);
+    expect(status).toBe(200);
+
+    const ids = parseCsv(body)
+      .slice(1)
+      .map((r) => r[0]!);
+    expect(ids).toHaveLength(506); // 501 bulk + 5 seeded
+    expect(ids).toEqual([...ids].sort());
+    expect(new Set(ids).size).toBe(506);
+    expect(ids).toContain('bulk-0499'); // last row of the first 500-row batch
+    expect(ids).toContain('bulk-0500'); // first row after the cursor boundary
   });
 });
 
